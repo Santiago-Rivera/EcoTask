@@ -1,0 +1,309 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Mic, MicOff, Headphones, Volume2, VolumeX, Settings, Activity } from 'lucide-react';
+
+declare global {
+  interface Window {
+    webkitAudioContext: typeof AudioContext;
+  }
+}
+import AudioVisualizer from './components/AudioVisualizer';
+import ToneAnalyzer from './components/ToneAnalyzer';
+import AudioControls from './components/AudioControls';
+import VoiceMetrics from './components/VoiceMetrics';
+import RecordingControls from './components/RecordingControls';
+import AudioFileUploader from './components/AudioFileUploader';
+import useSpeechToText from './hooks/useSpeechToText';
+import { VoiceData, RecordingSession } from './types/Recording';
+import { detectGender, calculateDominantGender, resetGenderBuffer } from './utils/voiceAnalysis';
+import { detectOffensiveWords, OffensiveWordDetection } from './utils/offensiveWordsDetector';
+import OffensiveWordsPanel from './components/OffensiveWordsPanel';
+
+function App() {
+  const [isRecording, setIsRecording] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [offensiveWords, setOffensiveWords] = useState<OffensiveWordDetection[]>([]);
+  const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
+  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const [outputGain, setOutputGain] = useState(0.5);
+  const [pitch, setPitch] = useState(0);
+  const [intensity, setIntensity] = useState(0);
+  const [voiceQuality, setVoiceQuality] = useState(0);
+  const [currentGender, setCurrentGender] = useState<'MASCULINA' | 'FEMENINA' | 'INDETERMINADA'>('INDETERMINADA');
+  const [isSessionRecording, setIsSessionRecording] = useState(false);
+  const [currentSession, setCurrentSession] = useState<RecordingSession | null>(null);
+  const [transcription, setTranscription] = useState('');
+  const [showFileUploader, setShowFileUploader] = useState(false);
+  
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (audioStream) {
+        audioStream.getTracks().forEach(track => track.stop());
+      }
+      if (audioContext) {
+        audioContext.close();
+      }
+    };
+  }, []);
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const context = new (window.AudioContext || window.webkitAudioContext)();
+      const source = context.createMediaStreamSource(stream);
+      const analyzer = context.createAnalyser();
+      
+      analyzer.fftSize = 2048;
+      source.connect(analyzer);
+      
+      setAudioContext(context);
+      setAudioStream(stream);
+      setAnalyser(analyzer);
+      sourceRef.current = source;
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Error al iniciar la grabación:', err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (audioStream) {
+      audioStream.getTracks().forEach(track => track.stop());
+      setAudioStream(null);
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+    }
+    setIsRecording(false);
+    resetGenderBuffer();
+  };
+
+  // Efecto para limpiar palabras ofensivas cuando se detiene la grabación
+  useEffect(() => {
+    if (!isRecording) {
+      setOffensiveWords([]);
+    }
+  }, [isRecording]);
+
+  // Usar el hook de reconocimiento de voz
+  useSpeechToText({
+    isRecording,
+    onTranscriptionChange: (text) => {
+      setTranscription(text);
+      const detectedWords = detectOffensiveWords(text);
+      if (detectedWords.length > 0) {
+        setOffensiveWords(prev => [...prev, ...detectedWords]);
+      }
+    }
+  });
+
+  // Effect para detectar género basado en pitch
+  useEffect(() => {
+    const gender = detectGender(pitch);
+    setCurrentGender(gender);
+  }, [pitch]);
+
+  const toggleListening = () => {
+    setIsListening(!isListening);
+    if (audioRef.current) {
+      audioRef.current.muted = isListening;
+    }
+  };
+
+  const handleVolumeChange = (volume: number) => {
+    setOutputGain(volume);
+    if (gainNodeRef.current) {
+      gainNodeRef.current.gain.value = volume;
+    }
+  };
+
+  const startSession = () => {
+    const sessionId = `SESION_${Date.now().toString(36).toUpperCase()}`;
+    const newSession: RecordingSession = {
+      id: sessionId,
+      startTime: Date.now(),
+      voiceData: [],
+      averagePitch: 0,
+      averageIntensity: 0,
+      averageQuality: 0,
+      dominantGender: 'INDETERMINADA',
+      duration: 0
+    };
+    setCurrentSession(newSession);
+    setIsSessionRecording(true);
+  };
+
+  const stopSession = () => {
+    setIsSessionRecording(false);
+  };
+
+  const saveSession = () => {
+    if (currentSession) {
+      const dataStr = JSON.stringify(currentSession);
+      const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+      const exportFileDefaultName = `sesion_voz_${currentSession.id}.json`;
+      
+      const linkElement = document.createElement('a');
+      linkElement.setAttribute('href', dataUri);
+      linkElement.setAttribute('download', exportFileDefaultName);
+      linkElement.click();
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-black">
+      <div className="container mx-auto px-4 py-8">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <h1 className="text-4xl font-bold text-green-400 mb-2 flex items-center justify-center gap-3">
+            <Activity className="text-green-400" size={40} />
+            Analizador de Tono de Voz
+          </h1>
+          <p className="text-green-300 text-lg">
+            Análisis en tiempo real para comunicación efectiva
+          </p>
+        </div>
+
+        {/* Main Controls */}
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">
+          {/* Speaker Controls */}
+          <div className="bg-gray-900 border border-green-500 rounded-xl p-6">
+            <h2 className="text-xl font-semibold text-green-400 mb-4 flex items-center gap-2">
+              <Mic className="text-green-400" size={24} />
+              Control del Hablante
+            </h2>
+            <div className="space-y-4">
+              <button
+                onClick={isRecording ? stopRecording : startRecording}
+                className={`w-full py-3 px-6 rounded-lg font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
+                  isRecording
+                    ? 'bg-red-600 hover:bg-red-700 text-white border border-red-500'
+                    : 'bg-green-600 hover:bg-green-700 text-black border border-green-400'
+                }`}
+              >
+                {isRecording ? <MicOff size={20} /> : <Mic size={20} />}
+                {isRecording ? 'Detener Micrófono' : 'Iniciar Micrófono'}
+              </button>
+            </div>
+          </div>
+
+          {/* Listener Controls */}
+          <div className="bg-gray-900 border border-green-500 rounded-xl p-6">
+            <h2 className="text-xl font-semibold text-green-400 mb-4">
+              Control del Oyente
+            </h2>
+            <button
+              onClick={toggleListening}
+              disabled={!isRecording}
+              className={`w-full py-3 px-6 rounded-lg font-semibold ${
+                !isRecording
+                  ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                  : isListening
+                  ? 'bg-green-600 hover:bg-green-700 text-white'
+                  : 'bg-gray-600 hover:bg-gray-700 text-white'
+              }`}
+            >
+              {isListening ? 'Escuchando' : 'Activar Audio'}
+            </button>
+          </div>
+
+          {/* Audio Controls */}
+          <div className="bg-gray-900 border border-green-500 rounded-xl p-6">
+            <h2 className="text-xl font-semibold text-green-400 mb-4">
+              Controles de Audio
+            </h2>
+            <AudioControls
+              outputGain={outputGain}
+              onVolumeChange={handleVolumeChange}
+              isRecording={isRecording}
+            />
+          </div>
+
+          {/* Recording Controls */}
+          <RecordingControls
+            isRecording={isRecording}
+            isSessionRecording={isSessionRecording}
+            currentSession={currentSession}
+            onStartSession={startSession}
+            onStopSession={stopSession}
+            onSaveSession={saveSession}
+            currentGender={currentGender}
+          />
+        </div>
+
+        {/* Analysis Section */}
+        {isRecording && analyser && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            {/* Audio Visualizer */}
+            <div className="bg-gray-900 border border-green-500 rounded-xl p-6">
+              <h3 className="text-lg font-semibold text-green-400 mb-4">Visualizador de Audio</h3>
+              <AudioVisualizer analyser={analyser} />
+            </div>
+
+            {/* Tone Analyzer */}
+            <div className="bg-gray-900 border border-green-500 rounded-xl p-6">
+              <h3 className="text-lg font-semibold text-green-400 mb-4">Analizador de Tono</h3>
+              <ToneAnalyzer 
+                analyser={analyser} 
+                onPitchChange={setPitch}
+                onIntensityChange={setIntensity}
+                onQualityChange={setVoiceQuality}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Voice Metrics */}
+        {isRecording && (
+          <VoiceMetrics 
+            pitch={pitch}
+            intensity={intensity}
+            voiceQuality={voiceQuality}
+            currentGender={currentGender}
+          />
+        )}
+
+        {/* Panel de palabras ofensivas */}
+        <div className="mt-6">
+          <OffensiveWordsPanel offensiveWords={offensiveWords} />
+        </div>
+
+        {/* Sección de carga de archivo de audio */}
+        <div className="mt-6">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold text-green-400">
+              Análisis de Archivo de Audio
+            </h2>
+            <button
+              onClick={() => setShowFileUploader(!showFileUploader)}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+            >
+              {showFileUploader ? 'Ocultar' : 'Mostrar'} Analizador de Archivos
+            </button>
+          </div>
+          
+          {showFileUploader && (
+            <AudioFileUploader 
+              onAnalysisComplete={(results) => {
+                console.log('Análisis completado:', results);
+              }}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Hidden audio element */}
+      <audio 
+        ref={audioRef} 
+        muted={!isListening}
+        style={{ display: 'none' }}
+      />
+    </div>
+  );
+}
+
+export default App;

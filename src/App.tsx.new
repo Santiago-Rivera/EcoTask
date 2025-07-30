@@ -1,0 +1,176 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Mic, MicOff, Headphones, Volume2, VolumeX, Settings, Activity } from 'lucide-react';
+
+declare global {
+  interface Window {
+    webkitAudioContext: typeof AudioContext;
+  }
+}
+
+import AudioVisualizer from './components/AudioVisualizer';
+import ToneAnalyzer from './components/ToneAnalyzer';
+import AudioControls from './components/AudioControls';
+import VoiceMetrics from './components/VoiceMetrics';
+import RecordingControls from './components/RecordingControls';
+import AudioFileUploader from './components/AudioFileUploader';
+import useSpeechToText from './hooks/useSpeechToText';
+import { VoiceData, RecordingSession } from './types/Recording';
+import { detectGender, calculateDominantGender, resetGenderBuffer } from './utils/voiceAnalysis';
+import { detectOffensiveWords, OffensiveWordDetection } from './utils/offensiveWordsDetector';
+import OffensiveWordsPanel from './components/OffensiveWordsPanel';
+
+function App() {
+  const [isRecording, setIsRecording] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [offensiveWords, setOffensiveWords] = useState<OffensiveWordDetection[]>([]);
+  const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
+  const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const [outputGain, setOutputGain] = useState(0.5);
+  const [pitch, setPitch] = useState(0);
+  const [intensity, setIntensity] = useState(0);
+  const [voiceQuality, setVoiceQuality] = useState(0);
+  const [currentGender, setCurrentGender] = useState<'MASCULINA' | 'FEMENINA' | 'INDETERMINADA'>('INDETERMINADA');
+  const [isSessionRecording, setIsSessionRecording] = useState(false);
+  const [currentSession, setCurrentSession] = useState<RecordingSession | null>(null);
+  const [transcription, setTranscription] = useState('');
+  const [showFileUploader, setShowFileUploader] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+
+  // Inicializar AudioContext
+  useEffect(() => {
+    const initAudioContext = async () => {
+      try {
+        const context = new (window.AudioContext || window.webkitAudioContext)();
+        setAudioContext(context);
+      } catch (err) {
+        setError('Error al inicializar el contexto de audio');
+        console.error('Error al inicializar AudioContext:', err);
+      }
+    };
+    initAudioContext();
+  }, []);
+
+  // Manejar la transcripción
+  useEffect(() => {
+    if (transcription) {
+      const newOffensiveWords = detectOffensiveWords(transcription);
+      if (newOffensiveWords.length > 0) {
+        setOffensiveWords(prev => [...prev, ...newOffensiveWords]);
+      }
+    }
+  }, [transcription]);
+
+  const startRecording = async () => {
+    try {
+      if (!audioContext) {
+        const context = new (window.AudioContext || window.webkitAudioContext)();
+        setAudioContext(context);
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
+
+      setAudioStream(stream);
+
+      if (audioContext) {
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyzer = audioContext.createAnalyser();
+        analyzer.fftSize = 2048;
+        
+        source.connect(analyzer);
+        sourceRef.current = source;
+        setAnalyser(analyzer);
+      }
+
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Error al iniciar la grabación:', err);
+      setError('Error al acceder al micrófono. Por favor, asegúrate de dar permisos de acceso.');
+    }
+  };
+
+  const stopRecording = () => {
+    if (audioStream) {
+      audioStream.getTracks().forEach(track => track.stop());
+      setAudioStream(null);
+    }
+    if (sourceRef.current) {
+      sourceRef.current.disconnect();
+      sourceRef.current = null;
+    }
+    setIsRecording(false);
+    resetGenderBuffer();
+  };
+
+  // Cleanup al desmontar
+  useEffect(() => {
+    return () => {
+      stopRecording();
+      if (audioContext) {
+        audioContext.close();
+      }
+    };
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-4">
+      <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-lg p-6">
+        <h1 className="text-3xl font-bold text-center mb-6">Analizador de Voz</h1>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-6">
+            <RecordingControls
+              isRecording={isRecording}
+              onStartRecording={startRecording}
+              onStopRecording={stopRecording}
+            />
+            
+            {analyser && (
+              <AudioVisualizer
+                analyser={analyser}
+                isRecording={isRecording}
+              />
+            )}
+          </div>
+
+          <div className="space-y-6">
+            <VoiceMetrics
+              pitch={pitch}
+              intensity={intensity}
+              voiceQuality={voiceQuality}
+              currentGender={currentGender}
+            />
+
+            <OffensiveWordsPanel
+              offensiveWords={offensiveWords}
+            />
+          </div>
+        </div>
+      </div>
+      
+      {error && (
+        <div className="fixed bottom-4 right-4 bg-red-500 text-white px-4 py-2 rounded-lg shadow">
+          {error}
+          <button
+            onClick={() => setError(null)}
+            className="ml-2 font-bold"
+          >
+            ×
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
